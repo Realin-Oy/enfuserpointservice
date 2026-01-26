@@ -1,22 +1,20 @@
 import json
-import requests
-from time import sleep
-from datetime import datetime, timedelta
-from pathlib import Path
-from . import parsing
-
-import pandas as pd
 from datetime import datetime
+from datetime import timedelta
+from pathlib import Path
+from time import sleep
 
-import traceback
+import requests
+
 
 default_credential_store = Path("./credentials.json")
 
+
 class EnfuserAPI:
-    def __init__(self, username=None, password=None, 
+    def __init__(self, username=None, password=None,
                  token_endpoint="https://epk.2.rahtiapp.fi/realms/enfuser-portal/protocol/openid-connect/token",
-                api_base="https://enfuser-portal.2.rahtiapp.fi"):
-        
+                 api_base="https://enfuser-portal.2.rahtiapp.fi"):
+
         if username is None or password is None:
             if not default_credential_store.exists():
                 raise Exception("No credentials provided and no default credential store found.")
@@ -27,7 +25,7 @@ class EnfuserAPI:
         else:
             self.username = username
             self.password = password
-        
+
         self.token = None
         self.token_acquired_time = None
         self.api_base = api_base
@@ -40,7 +38,6 @@ class EnfuserAPI:
         self.token_endpoint = token_endpoint
         self.get_token()
 
-
     def get_token(self):
         response = requests.post(self.token_endpoint, data={
             "client_id": "point-service",
@@ -50,7 +47,7 @@ class EnfuserAPI:
         })
         if response.status_code != 200:
             raise Exception(f"Failed to get token: {response.status_code}, {response.text}")
-        
+
         self.token = response.json()["access_token"]
         self.token_acquired_time = datetime.now()
 
@@ -58,24 +55,20 @@ class EnfuserAPI:
         if self.token is None or datetime.now() - self.token_acquired_time > timedelta(minutes=30):
             self.get_token()
         return {"Authorization": f"Bearer {self.token}"}
-    
+
     def turn_time_to_string(self, t):
 
         if isinstance(t, str):
             return t
 
-        if isinstance(t, datetime):
-            x = pd.Timestamp(t)
-        else:
-            x = t.copy()
-        
+        x = t.copy()
+
         if x.tzinfo is None:
             x = x.tz_localize("UTC")
         else:
             x = x.tz_convert("UTC")
 
         return x.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    
 
     def get_modelling_areas(self):
 
@@ -85,9 +78,9 @@ class EnfuserAPI:
         response = requests.get(self.regions_areas_endpoint, headers=self.get_headers())
         if response.status_code != 200:
             raise Exception(f"Failed to get areas: {response.status_code}, {response.text}")
-        
+
         return response.json()
-    
+
     def get_area(self, format="netcdf", variables=None, north=None, south=None, west=None, east=None, startTime=None):
         """
         Query the geotiff or netcdf endpoint with the given parameters.
@@ -119,7 +112,6 @@ class EnfuserAPI:
         if response.status_code != 200:
             raise Exception(f"Url {response.url}, failed to get {format}: {response.status_code}, {response.text}")
         return response
-    
 
     def get_statistics(self, lat, lon, starttime, endtime, parse=True):
         """
@@ -144,12 +136,13 @@ class EnfuserAPI:
         response = requests.get(self.point_statistics_endpoint, params=params, headers=self.get_headers())
         if response.status_code != 200:
             raise Exception(f"Failed to get statistics: {response.status_code}, {response.text}")
-        
+
         if parse:
+            from . import parsing
             return parsing.parse_statistics_endpoint(response.json())
 
         return response.json()
-    
+
     def get_zip(self, lat, lon, starttime):
         """
         Get a zip file containing data for the given location (the whole area your point belongs to) and starttime.
@@ -174,64 +167,67 @@ class EnfuserAPI:
             raise Exception(f"Failed to get zip data: {response.status_code}, {response.text}")
         return response
 
+    def acquire(self, lat, lon, starttime, endtime=None, parse=False, values=None, variables=None, retries=3,
+                retry_interval=2):
 
-    def acquire(self, lat, lon, starttime, endtime=None, parse=False, values=None, variables=None, retries=3, retry_interval=2):
+        """
+        Get data from the point service.
+        Arguments:
+        lat (float): Latitude.
+        lon (float): Longitude.
+        starttime (str or datetime): Start time (ISO string or datetime).
+        endtime (str or datetime, optional): End time (ISO string or datetime). Defaults to same as starttime.
+        parse (bool, optional): Whether to parse the response into xarray. Defaults to False
+        values (list, optional): List of value groups to request. Defaults to None, which requests all.
+        variables (list, optional): List of specific variables to request. Defaults to None, which requests all.
+        retries (int, optional): Number of retries for 403 responses. Defaults to 3.
+        retry_interval (int, optional): Seconds to wait between retries. Defaults to 2.
+        """
 
-            """
-            Get data from the point service.
-            Arguments:
-            lat (float): Latitude.
-            lon (float): Longitude.
-            starttime (str or datetime): Start time (ISO string or datetime).
-            endtime (str or datetime, optional): End time (ISO string or datetime). Defaults to same as starttime.
-            parse (bool, optional): Whether to parse the response into xarray. Defaults to False
-            values (list, optional): List of value groups to request. Defaults to None, which requests all.
-            variables (list, optional): List of specific variables to request. Defaults to None, which requests all.
-            retries (int, optional): Number of retries for 403 responses. Defaults to 3.
-            retry_interval (int, optional): Seconds to wait between retries. Defaults to 2.
-            """
+        str_start = self.turn_time_to_string(starttime)
+        if endtime is not None:
+            str_end = self.turn_time_to_string(endtime)
+        else:
+            str_end = None
 
-            str_start = self.turn_time_to_string(starttime)
-            if endtime is not None:
-                str_end = self.turn_time_to_string(endtime)
+        print(f"Getting data at {lat}, {lon} from {str_start} to {str_end}")
+        params = {
+            "lat": lat,
+            "lon": lon,
+            "startTime": str_start,
+            "endTime": str_end,
+        }
+        if values is not None:
+            params["values"] = values
+        if variables is not None:
+            params["variables"] = variables
+            if values is not None and len(values) == 1 and values[0] == "meteorology":
+                raise ValueError("Requesting only meteorology and specifying variables leads to empty response.")
+
+        for attempt in range(retries):
+            result = requests.get(self.api_endpoint, params=params, headers=self.get_headers())
+            if result.status_code == 403:
+                print("Retrying")
+                # wait for few seconds and try again
+                sleep(retry_interval)
             else:
-                str_end = None
+                if result.status_code != 200:
+                    raise Exception(
+                        f"Failed to get data: {result.status_code}, {result.text}, request url: {result.url}")
+                break
+        else:
+            raise Exception(
+                "Failed to get data after multiple retries. Please make sure you have been granted permission to pointservice & check your credentials.")
 
-            print(f"Getting data at {lat}, {lon} from {str_start} to {str_end}")
-            params = {
-                "lat": lat,
-                "lon": lon,
-                "startTime": str_start,
-                "endTime": str_end,
-            }
-            if values is not None:
-                params["values"] = values
-            if variables is not None:
-                params["variables"] = variables
-                if values is not None and len(values) == 1 and values[0] == "meteorology":
-                    raise ValueError("Requesting only meteorology and specifying variables leads to empty response.")
-    
-            for attempt in range(retries):
-                result = requests.get(self.api_endpoint, params=params, headers=self.get_headers())
-                if result.status_code == 403:
-                    print("Retrying")
-                    #wait for few seconds and try again
-                    sleep(retry_interval)
-                else:
-                    if result.status_code != 200:
-                        raise Exception(f"Failed to get data: {result.status_code}, {result.text}, request url: {result.url}")
-                    break
-            else:
-                raise Exception("Failed to get data after multiple retries. Please make sure you have been granted permission to pointservice & check your credentials.")
-            
-            if not parse:
-                return result.json()
+        if not parse:
+            return result.json()
 
-            try:
-                return parsing.transform_to_xarray(result.json())
-            except Exception as e:
-                raise Exception(f"Failed to parse response. Response text: {result.text}") from e
-            
+        try:
+            from . import parsing
+            return parsing.transform_to_xarray(result.json())
+        except Exception as e:
+            raise Exception(f"Failed to parse response. Response text: {result.text}") from e
+
     def list_endpoints_and_associated_functions(self):
         """Lists available endpoints and their associated functions as a dictionary."""
 
